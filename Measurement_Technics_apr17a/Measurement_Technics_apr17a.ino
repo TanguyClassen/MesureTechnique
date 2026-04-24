@@ -17,6 +17,26 @@
   bool   Tare_accel    (Read/Write)  <-- Push Button widget on dashboard
 */
 
+
+/*
+  Arduino IoT Cloud Dashboard
+  Hardware : Arduino Nano ESP32
+  Sensors  : HX711 load cell amplifier + MMA8451 accelerometer
+  Dashboard: Live weight, acceleration XYZ, tilt angles, time-series charts
+             + Tare buttons for load cell and accelerometer
+
+  --- Cloud Variables ---
+  float  weight_kg     (Read Only)
+  float  accel_x       (Read Only)
+  float  accel_y       (Read Only)
+  float  accel_z       (Read Only)
+  float  tilt_x        (Read Only)
+  float  tilt_y        (Read Only)
+  bool   Tare_weight   (Read/Write)  <-- Push Button widget on dashboard
+  bool   Tare_accel    (Read/Write)  <-- Push Button widget on dashboard
+*/
+
+#include "arduino_secrets.h"
 #include "thingProperties.h"
 #include <HX711.h>
 #include <Wire.h>
@@ -29,24 +49,38 @@
 #define HX711_SCK   D3
 
 // ── Calibration ─────────────────────────────────────────────────────────────
-#define CALIBRATION_FACTOR  -7050.0   // <-- CHANGE after calibration
+#define CALIBRATION_FACTOR  -7050.0
 #define TARE_ON_BOOT        true
 
-// ── Update rate ─────────────────────────────────────────────────────────────
-#define UPDATE_INTERVAL_MS  500
+// ── Update rates ─────────────────────────────────────────────────────────────
+#define SERIAL_INTERVAL_MS  100     // ~10 Hz display
+#define CLOUD_INTERVAL_MS   1000    // 1 Hz cloud sync
+
+// ── Circular buffer (last 30 lines) ──────────────────────────────────────────
+#define BUFFER_LINES 30
+char lineBuffer[BUFFER_LINES][110];
+uint8_t bufHead  = 0;
+uint8_t bufCount = 0;
+
+// ── ANSI escape codes ─────────────────────────────────────────────────────────
+#define ANSI_CLEAR    "\033"
+#define ANSI_HOME     "\033"
+#define ANSI_BOLD     "\033"
+#define ANSI_RESET    "\033"
 
 // ── Accel tare offsets ───────────────────────────────────────────────────────
 float accel_offset_x = 0.0;
 float accel_offset_y = 0.0;
 float accel_offset_z = 0.0;
 
-// ── Objects ─────────────────────────────────────────────────────────────────
+// ── Objects ──────────────────────────────────────────────────────────────────
 HX711            scale;
 Adafruit_MMA8451 mma;
 
-unsigned long lastUpdate = 0;
+unsigned long lastSerial = 0;
+unsigned long lastCloud  = 0;
 
-// ────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
   delay(1500);
@@ -72,70 +106,93 @@ void setup() {
   }
   mma.setRange(MMA8451_RANGE_2_G);
   Serial.println("MMA8451 ready.");
+
+  Serial.print(ANSI_CLEAR);
+  Serial.print(ANSI_HOME);
 }
 
-// ────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 void loop() {
   ArduinoCloud.update();
 
-  if (millis() - lastUpdate >= UPDATE_INTERVAL_MS) {
-    lastUpdate = millis();
+  unsigned long now = millis();
+
+  if (now - lastSerial >= SERIAL_INTERVAL_MS) {
+    lastSerial = now;
     readLoadCell();
     readAccelerometer();
+    pushLine();
+    redrawScreen();
+  }
+
+  if (now - lastCloud >= CLOUD_INTERVAL_MS) {
+    lastCloud = now;
   }
 }
 
-// ────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 void readLoadCell() {
   if (!scale.is_ready()) return;
-
-  float kg = scale.get_units(5);
-  if (kg < 0.002 && kg > -0.002) kg = 0.0;
+  float kg = scale.get_units(1);
+  if (kg > -0.002 && kg < 0.002) kg = 0.0;
   weight_kg = kg;
-
-  Serial.print("Weight: ");
-  Serial.print(weight_kg, 3);
-  Serial.println(" kg");
 }
 
-// ────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 void readAccelerometer() {
   sensors_event_t event;
   mma.getEvent(&event);
 
-  // Apply tare offsets
   accel_x = event.acceleration.x - accel_offset_x;
   accel_y = event.acceleration.y - accel_offset_y;
   accel_z = event.acceleration.z - accel_offset_z;
 
   tilt_x = atan2(accel_y, sqrt(accel_x * accel_x + accel_z * accel_z)) * 180.0 / M_PI;
   tilt_y = atan2(-accel_x, accel_z) * 180.0 / M_PI;
-
-  Serial.printf("Accel  X=%.2f  Y=%.2f  Z=%.2f m/s²\n", accel_x, accel_y, accel_z);
-  Serial.printf("Tilt   Pitch=%.1f°  Roll=%.1f°\n", tilt_x, tilt_y);
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Called by Arduino Cloud when Tare_weight flips to true from the dashboard
-void onTareWeightChange() {
-  if (Tare_weight) {
-    Serial.println(">>> Taring load cell...");
-    scale.tare(10);
-    Serial.println(">>> Load cell tare done.");
-    Tare_weight = false;   // Reset the button back to false
+// ─────────────────────────────────────────────────────────────────────────────
+void pushLine() {
+  float norm = sqrt(accel_x * accel_x + accel_y * accel_y + accel_z * accel_z);
+  snprintf(lineBuffer[bufHead], sizeof(lineBuffer[0]),
+    "  %9.3f  | %9.3f | %9.3f | %9.3f |  %9.3f  | %8.2f | %7.2f",
+    weight_kg, accel_x, accel_y, accel_z, norm, tilt_x, tilt_y);
+  bufHead = (bufHead + 1) % BUFFER_LINES;
+  if (bufCount < BUFFER_LINES) bufCount++;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+void redrawScreen() {
+  Serial.print(ANSI_HOME);
+
+  Serial.print(ANSI_BOLD);
+  Serial.println(F("Weight(kg) |  Accel X  |  Accel Y  |  Accel Z  |  Norm(m/s2) | Pitch(deg) | Roll(deg)"));
+  Serial.print(ANSI_RESET);
+  Serial.println(F(" -----------+-----------+-----------+-----------+-------------+------------+----------"));
+
+  uint8_t start = (bufCount < BUFFER_LINES) ? 0 : bufHead;
+  for (uint8_t i = 0; i < bufCount; i++) {
+    uint8_t idx = (start + i) % BUFFER_LINES;
+    Serial.println(lineBuffer[idx]);
+  }
+
+  for (uint8_t i = bufCount; i < BUFFER_LINES; i++) {
+    Serial.println(F(""));
   }
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Called by Arduino Cloud when Tare_accel flips to true from the dashboard
+// ─────────────────────────────────────────────────────────────────────────────
+void onTareWeightChange() {
+  if (Tare_weight) {
+    scale.tare(10);
+    Tare_weight = false;
+  }
+}
+
 void onTareAccelChange() {
   if (Tare_accel) {
-    Serial.println(">>> Taring accelerometer...");
-
-    // Average several readings for a stable offset
     float sx = 0, sy = 0, sz = 0;
-    int samples = 20;
-    for (int i = 0; i < samples; i++) {
+    for (int i = 0; i < 20; i++) {
       sensors_event_t event;
       mma.getEvent(&event);
       sx += event.acceleration.x;
@@ -143,56 +200,16 @@ void onTareAccelChange() {
       sz += event.acceleration.z;
       delay(10);
     }
-    accel_offset_x = sx / samples;
-    accel_offset_y = sy / samples;
-    accel_offset_z = sz / samples;
-
-    Serial.printf(">>> Accel offsets set: X=%.3f Y=%.3f Z=%.3f\n",
-                  accel_offset_x, accel_offset_y, accel_offset_z);
-
-    Tare_accel = false;   // Reset the button back to false
+    accel_offset_x = sx / 20.0;
+    accel_offset_y = sy / 20.0;
+    accel_offset_z = sz / 20.0;
+    Tare_accel = false;
   }
 }
 
-/*
-  Since AccelX is READ_WRITE variable, onAccelXChange() is
-  executed every time a new value is received from IoT Cloud.
-*/
-void onAccelXChange()  {
-  // Add your code here to act upon AccelX change
-}
-/*
-  Since AccelY is READ_WRITE variable, onAccelYChange() is
-  executed every time a new value is received from IoT Cloud.
-*/
-void onAccelYChange()  {
-  // Add your code here to act upon AccelY change
-}
-/*
-  Since AccelZ is READ_WRITE variable, onAccelZChange() is
-  executed every time a new value is received from IoT Cloud.
-*/
-void onAccelZChange()  {
-  // Add your code here to act upon AccelZ change
-}
-/*
-  Since TiltX is READ_WRITE variable, onTiltXChange() is
-  executed every time a new value is received from IoT Cloud.
-*/
-void onTiltXChange()  {
-  // Add your code here to act upon TiltX change
-}
-/*
-  Since TiltY is READ_WRITE variable, onTiltYChange() is
-  executed every time a new value is received from IoT Cloud.
-*/
-void onTiltYChange()  {
-  // Add your code here to act upon TiltY change
-}
-/*
-  Since WeightKg is READ_WRITE variable, onWeightKgChange() is
-  executed every time a new value is received from IoT Cloud.
-*/
-void onWeightKgChange()  {
-  // Add your code here to act upon WeightKg change
-}
+void onAccelXChange()   {}
+void onAccelYChange()   {}
+void onAccelZChange()   {}
+void onTiltXChange()    {}
+void onTiltYChange()    {}
+void onWeightKgChange() {}
