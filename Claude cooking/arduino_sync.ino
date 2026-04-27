@@ -28,7 +28,7 @@
 // ── Pins ─────────────────────────────────────────────────────────────────────
 #define HX711_DOUT   D2
 #define HX711_SCK    D3
-#define LED_SYNC_PIN D13    // LED + 220Ω to GND
+#define LED_SYNC_PIN D4    // LED + 220Ω to GND
 
 // ── Sample intervals ──────────────────────────────────────────────────────────
 // At 80 SPS the HX711 produces a new sample every 12.5 ms
@@ -36,7 +36,7 @@
 #define WEIGHT_INTERVAL_MS   13     // ~76 Hz  (set RATE pin HIGH for this to work)
 #define ACCEL_INTERVAL_MS     5     // 200 Hz  (MMA8451 ODR set to 400 Hz below)
 #define SERIAL_STATUS_MS   2000     // print sample rates every 2 s
-#define LED_FLASH_MS        1000
+#define LED_FLASH_MS        300
 
 // ── Calibration ───────────────────────────────────────────────────────────────
 #define CALIBRATION_FACTOR  -7050.0
