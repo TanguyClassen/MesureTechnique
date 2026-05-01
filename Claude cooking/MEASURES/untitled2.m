@@ -1,0 +1,309 @@
+% ═══════════════════════════════════════════════════════════════════════════════
+% ME-301 — Single experiment quick view
+% Just change the CSV_FILE line below and run.
+% ═══════════════════════════════════════════════════════════════════════════════
+
+clear; clc; close all;
+
+% ── CHANGE THIS LINE ──────────────────────────────────────────────────────────
+CSV_FILE = 'M1/M1_1.csv';   % path relative to this .m file
+% ─────────────────────────────────────────────────────────────────────────────
+
+BASE_DIR = fileparts(mfilename('fullpath'));
+path     = fullfile(BASE_DIR, CSV_FILE);
+
+if ~isfile(path)
+    error('File not found: %s', path);
+end
+
+% ─────────────────────────────────────────────────────────────────────────────
+%  LOAD & SPLIT
+% ─────────────────────────────────────────────────────────────────────────────
+T   = readtable(path, 'TextType','string');
+src = lower(string(T.source));
+
+W = T(src=="weight" & ~ismissing(T.weight_kg), :);
+A = T(src=="accel"  & ~ismissing(T.norm_accel),:);
+V = T(src=="video"  & ~ismissing(T.angle_deg), :);
+
+% Time relative to start
+if height(W)>0; W.time_s = W.time_s - W.time_s(1); end
+if height(A)>0; A.time_s = A.time_s - A.time_s(1); end
+if height(V)>0; V.time_s = V.time_s - V.time_s(1); end
+
+% Sync event times
+sync_t = [];
+if ismember('sync',T.Properties.VariableNames)
+    S = T(T.sync==1,:);
+    if height(S)>0; sync_t = S.time_s - T.time_s(1); end
+end
+
+% Sample rates
+sr_w = get_sr(W.time_s);
+sr_a = get_sr(A.time_s);
+sr_v = get_sr(V.time_s);
+
+fprintf('Loaded: %s\n', CSV_FILE);
+fprintf('  Weight : %d rows @ %.1f Hz\n', height(W), sr_w);
+fprintf('  Accel  : %d rows @ %.1f Hz\n', height(A), sr_a);
+fprintf('  Video  : %d rows @ %.1f Hz\n', height(V), sr_v);
+fprintf('  Sync events : %d\n', numel(sync_t));
+
+% ─────────────────────────────────────────────────────────────────────────────
+%  FILTERS
+% ─────────────────────────────────────────────────────────────────────────────
+ORDER = 4;
+
+% Weight — low-pass 0.5 Hz  (jet force is very slow)
+W.weight_filt = W.weight_kg;
+if sr_w > 1
+    [b,a] = butter(ORDER, 0.5/(sr_w/2), 'low');
+    W.weight_filt = filtfilt(b, a, double(W.weight_kg));
+end
+
+% Accel norm — low-pass 15 Hz
+A.norm_filt = A.norm_accel;
+if sr_a > 30
+    [b,a] = butter(ORDER, 15/(sr_a/2), 'low');
+    A.norm_filt = filtfilt(b, a, double(A.norm_accel));
+end
+
+% Angle — band-pass 0.3–4 Hz  (pendulum swings at ~1.4 Hz)
+V.angle_filt = V.angle_deg;
+if sr_v > 8 && height(V) > ORDER*6
+    [b,a] = butter(ORDER, [0.3 4.0]/(sr_v/2), 'bandpass');
+    V.angle_filt = filtfilt(b, a, double(V.angle_deg));
+end
+
+% ─────────────────────────────────────────────────────────────────────────────
+%  FIGURE 1 — Time series  (raw + filtered side by side)
+% ─────────────────────────────────────────────────────────────────────────────
+figure('Name','Time Series','Color',[0.06 0.07 0.09],'Position',[80 60 1300 820]);
+sgtitle(sprintf('Time series — %s', CSV_FILE), 'Color','w','FontSize',13,'FontWeight','bold');
+
+xmin = 15;
+xmax = 40;
+% ── Weight ──
+ax1 = subplot(3,2,1); dark_ax(ax1);
+plot(W.time_s, W.weight_kg,    'Color',[0.4 0.6 1 0.4], 'LineWidth',0.7); hold on;
+xlim([xmin xmax])     % e.g., xlim([0 5])
+plot(W.time_s, W.weight_filt,  'Color',[0.4 0.6 1],     'LineWidth',1.8);
+xlim([xmin xmax])     % e.g., xlim([0 5])
+draw_sync(ax1, sync_t);
+ylabel('Weight (kg)'); xlabel('Time (s)');
+title('Load cell — raw (faded) + filtered (solid)','Color','w');
+legend({'Raw','Filtered (LP 0.5 Hz)'},'TextColor','w','Color',[0.1 0.1 0.2],'Location','best');
+sr_text(ax1, sr_w);
+
+% ── Weight zoomed ──
+% ax2 = subplot(3,2,2); dark_ax(ax2);
+% t_mid = W.time_s(end)/2;
+% mask  = W.time_s >= t_mid-5 & W.time_s <= t_mid+5;
+% plot(W.time_s(mask), W.weight_kg(mask),   'Color',[0.4 0.6 1 0.4],'LineWidth',0.8); hold on;
+% plot(W.time_s(mask), W.weight_filt(mask), 'Color',[0.4 0.6 1],    'LineWidth',1.8);
+% ylabel('Weight (kg)'); xlabel('Time (s)');
+% title('Load cell — 10 s zoom (middle of recording)','Color','w');
+
+% ── Accel norm ──
+ax3 = subplot(3,2,3); dark_ax(ax3);
+xlim([xmin xmax])
+plot(A.time_s, A.norm_accel, 'Color',[0.24 0.81 0.56 0.35],'LineWidth',0.6); hold on;
+xlim([xmin xmax])
+plot(A.time_s, A.norm_filt,  'Color',[0.24 0.81 0.56],     'LineWidth',1.8);
+draw_sync(ax3, sync_t);
+ylabel('|a| (m/s²)'); xlabel('Time (s)');
+title('Acceleration magnitude — raw + filtered (LP 15 Hz)','Color','w');
+sr_text(ax3, sr_a);
+
+
+ax4 = subplot(3,2,4); dark_ax(ax4);
+xlim([xmin xmax])
+plot(A.time_s, A.norm_accel, 'Color',[0.24 0.81 0.56 0.35],'LineWidth',0.6); hold on;
+xlim([xmin xmax])
+plot(A.time_s, A.norm_filt,  'Color',[0.24 0.81 0.56],     'LineWidth',1.8);
+draw_sync(ax3, sync_t);
+ylabel('|a| (m/s²)'); xlabel('Time (s)');
+title('Acceleration magnitude — raw + filtered (LP 15 Hz)','Color','w');
+sr_text(ax3, sr_a);
+
+% ── Accel XYZ ──
+% ax4 = subplot(3,2,4); dark_ax(ax4);
+% if ismember('accel_x',A.Properties.VariableNames)
+%     plot(A.time_s, A.accel_x, 'Color',[0.4 0.6 1   0.8],'LineWidth',0.9,'DisplayName','X'); hold on;
+%     plot(A.time_s, A.accel_y, 'Color',[0.24 0.81 0.56 0.8],'LineWidth',0.9,'DisplayName','Y');
+%     plot(A.time_s, A.accel_z, 'Color',[0.94 0.65 0.14 0.8],'LineWidth',0.9,'DisplayName','Z');
+%     legend('TextColor','w','Color',[0.1 0.1 0.2],'Location','best');
+% end
+% draw_sync(ax4, sync_t);
+% ylabel('Acceleration (m/s²)'); xlabel('Time (s)');
+% title('Accel X / Y / Z axes','Color','w');
+% 
+% % ── Angle ──
+% ax5 = subplot(3,2,5); dark_ax(ax5);
+% if height(V)>0
+%     plot(V.time_s, V.angle_deg,  'Color',[0.94 0.65 0.14 0.35],'LineWidth',0.7); hold on;
+%     plot(V.time_s, V.angle_filt, 'Color',[0.94 0.65 0.14],     'LineWidth',1.8);
+%     draw_sync(ax5, sync_t);
+%     % Mean line
+%     mu = mean(double(V.angle_filt),'omitnan');
+%     yline(mu,'w--','LineWidth',1,'Label',sprintf('Mean = %.2f°',mu),'LabelHorizontalAlignment','left','Color',[0.7 0.7 0.7]);
+% end
+% ylabel('Angle θ (°)'); xlabel('Time (s)');
+% title('Pendulum angle — raw + filtered (BP 0.3–4 Hz)','Color','w');
+% sr_text(ax5, sr_v);
+% 
+% % ── Weight vs Angle ──
+% ax6 = subplot(3,2,6); dark_ax(ax6);
+% if height(V)>0 && height(W)>0
+%     w_i = interp1(W.time_s, double(W.weight_filt), V.time_s, 'linear','extrap');
+%     th  = double(V.angle_filt);
+%     ok  = ~isnan(w_i)&~isnan(th);
+%     scatter(w_i(ok), th(ok), 6, V.time_s(ok), 'filled', 'MarkerFaceAlpha',0.6);
+%     colorbar('Color','w'); colormap(ax6,'plasma');
+%     if sum(ok)>2
+%         c=polyfit(w_i(ok),th(ok),1);
+%         xf=linspace(min(w_i(ok)),max(w_i(ok)),200);
+%         hold on; plot(xf,polyval(c,xf),'w--','LineWidth',1.4);
+%         text(mean(xf),polyval(c,mean(xf))+0.3,...
+%              sprintf('slope = %.2f °/kg',c(1)),'Color','w','FontSize',8);
+%     end
+% end
+% xlabel('Weight (kg)'); ylabel('Angle θ (°)');
+% title('Angle vs Load  (colour = time)','Color','w');
+
+% ─────────────────────────────────────────────────────────────────────────────
+%  FIGURE 2 — FFT
+% ─────────────────────────────────────────────────────────────────────────────
+% figure('Name','FFT','Color',[0.06 0.07 0.09],'Position',[120 80 1200 750]);
+% sgtitle(sprintf('Spectral analysis — %s', CSV_FILE),'Color','w','FontSize',13,'FontWeight','bold');
+% 
+% % ── Weight FFT ──
+% ax = subplot(3,1,1); dark_ax(ax);
+% if height(W)>8
+%     [f,P] = do_fft(W.time_s, W.weight_filt, 'hann');
+%     mask  = f>0 & f<=2;
+%     area(f(mask),P(mask),'FaceColor',[0.4 0.6 1],'FaceAlpha',0.4,'EdgeColor',[0.4 0.6 1],'LineWidth',1.2);
+%     annotate_peak(ax, f(mask), P(mask), [0.4 0.6 1]);
+% end
+% ylabel('PSD (kg²/Hz)'); xlabel('Frequency (Hz)');
+% title('Weight FFT — Hann window — LP filtered','Color','w');
+% xlim([0 2]);
+% 
+% % ── Accel FFT ──
+% ax = subplot(3,1,2); dark_ax(ax);
+% if height(A)>8
+%     [f,P] = do_fft(A.time_s, A.norm_filt, 'hann');
+%     mask  = f>0 & f<=15;
+%     area(f(mask),P(mask),'FaceColor',[0.24 0.81 0.56],'FaceAlpha',0.4,'EdgeColor',[0.24 0.81 0.56],'LineWidth',1.2);
+%     annotate_peak(ax, f(mask), P(mask), [0.24 0.81 0.56]);
+% end
+% ylabel('PSD (m²s⁻⁴/Hz)'); xlabel('Frequency (Hz)');
+% title('Accel |norm| FFT — Hann window — LP filtered','Color','w');
+% xlim([0 15]);
+% 
+% % ── Angle FFT ──
+% ax = subplot(3,1,3); dark_ax(ax);
+% if height(V)>8
+%     [f,P] = do_fft(V.time_s, V.angle_filt, 'blackman');
+%     mask  = f>0 & f<=5;
+%     area(f(mask),P(mask),'FaceColor',[0.94 0.65 0.14],'FaceAlpha',0.4,'EdgeColor',[0.94 0.65 0.14],'LineWidth',1.2);
+%     annotate_peak(ax, f(mask), P(mask), [0.94 0.65 0.14]);
+%     % Theoretical pendulum frequency (L from data if available)
+%     if ismember('L_mm',V.Properties.VariableNames)
+%         L_m = mean(double(V.L_mm),'omitnan')/1000;
+%         f_th = sqrt(9.81/L_m)/(2*pi);
+%         xline(f_th,'w:','LineWidth',1.2,'Label',sprintf('Theory: %.3f Hz (L=%.0fmm)',f_th,L_m*1000),...
+%               'LabelColor','w','LabelHorizontalAlignment','right');
+%     end
+% end
+% ylabel('PSD (°²/Hz)'); xlabel('Frequency (Hz)');
+% title('Angle FFT — Blackman window — BP filtered   (Blackman chosen for narrow-peak resolution)','Color','w');
+% xlim([0 5]);
+% 
+% % ─────────────────────────────────────────────────────────────────────────────
+% %  FIGURE 3 — Quick stats summary
+% % ─────────────────────────────────────────────────────────────────────────────
+% figure('Name','Summary','Color',[0.06 0.07 0.09],'Position',[160 100 700 500]);
+% sgtitle(sprintf('Quick stats — %s', CSV_FILE),'Color','w','FontSize',13,'FontWeight','bold');
+% 
+% labels = {};  means = [];  stds = [];
+% if height(W)>0
+%     labels{end+1}='Weight\n(kg)'; means(end+1)=mean(double(W.weight_filt),'omitnan'); stds(end+1)=std(double(W.weight_filt),'omitnan');
+% end
+% if height(A)>0
+%     labels{end+1}='|a|\n(m/s²)'; means(end+1)=mean(double(A.norm_filt),'omitnan'); stds(end+1)=std(double(A.norm_filt),'omitnan');
+% end
+% if height(V)>0
+%     labels{end+1}='Angle\n(°)'; means(end+1)=mean(double(V.angle_filt),'omitnan'); stds(end+1)=std(double(V.angle_filt),'omitnan');
+% end
+% 
+% ax=axes(); dark_ax(ax);
+% b=bar(means,'FaceColor','flat');
+% cols=[0.4 0.6 1; 0.24 0.81 0.56; 0.94 0.65 0.14];
+% for i=1:numel(means); b.CData(i,:)=cols(i,:); end
+% hold on;
+% errorbar(1:numel(means), means, stds, 'k.', 'LineWidth',1.5,'CapSize',8);
+% set(ax,'XTickLabel',cellfun(@(s)sprintf(s),labels,'UniformOutput',false),'XTick',1:numel(means));
+% ylabel('Filtered mean value');
+% title('Mean ± std  (filtered signals)','Color','w');
+% for i=1:numel(means)
+%     text(i, means(i)+stds(i)+0.02*max(abs(means+stds)+0.01), ...
+%          sprintf('μ=%.3g\nσ=%.3g',means(i),stds(i)),...
+%          'HorizontalAlignment','center','Color','w','FontSize',8);
+% end
+
+% ─────────────────────────────────────────────────────────────────────────────
+%  LOCAL FUNCTIONS
+% ─────────────────────────────────────────────────────────────────────────────
+function sr = get_sr(t)
+    t=double(t); if numel(t)<2; sr=0; return; end
+    dt=diff(t); dt=dt(dt>0);
+    if isempty(dt); sr=0; else; sr=1/median(dt); end
+end
+
+function [f,P] = do_fft(t, y, window_type)
+    y=double(y); t=double(t);
+    ok=~isnan(y)&~isnan(t); y=y(ok); t=t(ok);
+    N=numel(y); if N<8; f=[]; P=[]; return; end
+    dt=median(diff(t)); Fs=1/dt;
+    switch lower(window_type)
+        case 'blackman'; w=blackman(N);
+        case 'hann';     w=hann(N);
+        otherwise;       w=ones(N,1);
+    end
+    Y   = fft((y-mean(y)).*w);
+    P2  = abs(Y/N).^2;
+    P   = [P2(1); 2*P2(2:floor(N/2)+1)];
+    f   = Fs*(0:floor(N/2))'/N;
+end
+
+function annotate_peak(ax, f, P, col)
+    if isempty(P); return; end
+    [Pm,ix]=max(P);
+    hold(ax,'on');
+    xline(ax, f(ix),'--','Color',[col 0.7],'LineWidth',1.2);
+    text(ax, f(ix), Pm, sprintf('  Peak: %.4f Hz', f(ix)), ...
+         'Color','w','FontSize',9,'FontWeight','bold','VerticalAlignment','top');
+end
+
+function draw_sync(ax, sync_t)
+    if isempty(sync_t); return; end
+    hold(ax,'on');
+    for i=1:numel(sync_t)
+        xline(ax, sync_t(i),'--','Color',[0.95 0.65 0.14 0.7],'LineWidth',1.2,...
+              'Label','SYNC','LabelColor',[0.95 0.65 0.14],'LabelOrientation','horizontal');
+    end
+end
+
+function sr_text(ax, sr)
+    text(ax, 0.99, 0.97, sprintf('SR: %.0f Hz', sr), 'Units','normalized',...
+         'HorizontalAlignment','right','VerticalAlignment','top',...
+         'Color',[0.55 0.55 0.55],'FontSize',8);
+end
+
+function dark_ax(ax)
+    set(ax,'Color',[0.13 0.15 0.22],'XColor',[0.6 0.62 0.7],...
+           'YColor',[0.6 0.62 0.7],'GridColor',[0.25 0.27 0.35],...
+           'GridAlpha',0.5,'FontSize',8,'Box','off');
+    grid(ax,'on');
+end

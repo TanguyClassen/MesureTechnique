@@ -1,0 +1,116 @@
+clear; clc; close all;
+
+% ══════════════════════════════════════
+%  CHANGE THESE
+% ══════════════════════════════════════
+CSV_FILE    = fullfile('M1', 'M1_1.csv');
+SIGNAL      = 'norm_accel';
+SOURCE      = 'accel';
+T_MIN       = 10.0;
+T_MAX       = 40.0;
+HIGHPASS_HZ = 0.3;   % high-pass cutoff [Hz]
+LOWPASS_HZ  = 5.0;   % low-pass  cutoff [Hz]
+FREQ_MAX    = 15.0;  % FFT x-axis max   [Hz]
+% ══════════════════════════════════════
+
+% Load
+BASE = fileparts(mfilename('fullpath'));
+T    = readtable(fullfile(BASE, CSV_FILE));
+D    = T(strcmp(lower(T.source), lower(SOURCE)), :);
+t    = D.time_s - D.time_s(1);
+y    = D.(SIGNAL);
+
+% Crop
+ok = t >= T_MIN & t <= T_MAX & ~isnan(y);
+t  = t(ok);
+y  = y(ok);
+Fs = 1 / median(diff(t));
+
+% High-pass then low-pass (band-pass effect)
+[bh, ah] = butter(4, HIGHPASS_HZ/(Fs/2), 'high');
+y_hp     = filtfilt(bh, ah, y);
+
+[bl, al] = butter(4, LOWPASS_HZ/(Fs/2), 'low');
+y_filt   = filtfilt(bl, al, y_hp);
+
+% FFT function
+% N    = numel(y);
+% f    = Fs*(0:floor(N/2))' / N;
+% mask = f > 0 & f <= FREQ_MAX;
+% fft_psd = @(sig) deal(f(mask), compute_fft(sig, N, mask));
+% [f_raw,  P_raw]  = fft_psd(y);
+% [f_filt, P_filt] = fft_psd(y_filt);
+
+
+y_new = y-mean(y)
+
+fs = 70;               % sampling freq (Hz)
+x = y_new(:);       % column vector
+N = length(x);
+
+Y = fft(x);
+P2 = abs(Y)/N;           % two-sided spectrum (amplitude scaled)
+if mod(N,2)==0
+    k = 0:N/2;           % includes Nyquist for even N
+else
+    k = 0:floor(N/2);    % odd N
+end
+P1 = P2(k+1);
+P1(2:end-1) = 2*P1(2:end-1);  % double non-DC/non-Nyquist bins
+
+f = 2*fs*(k)/N;           % frequency vector in Hz
+
+plot(f, P1, 'LineWidth',1.2)
+xlabel('Frequency (Hz)')
+ylabel('|P1(f)|')
+xlim([0 fs])
+
+plot(abs(fft(f.*hamming(N))))
+
+
+% 
+% 
+% % Plot
+% figure();
+% 
+% subplot(4,1,1);
+% plot(t, y);
+% title('Raw signal'); ylabel(SIGNAL,'Interpreter','none'); xlabel('Time (s)'); grid on;
+% 
+% subplot(4,1,3);
+% plot(y_new);
+% 
+% subplot(4,1,2);
+% plot(abs(fft(y)));
+% ylim([0 500]);
+% 
+% 
+% subplot(4,1,4);
+% plot(abs(fft(y_new)));
+% ylim([0 500]);
+% 
+% 
+% % plot(t, y_filt);
+% % title(sprintf('Filtered — high-pass %.1f Hz + low-pass %.1f Hz', HIGHPASS_HZ, LOWPASS_HZ));
+% % ylabel(SIGNAL,'Interpreter','none'); xlabel('Time (s)'); grid on;
+% 
+% 
+% % subplot(4,1,3);
+% % plot(f_raw, P_raw);
+% % [~,ix] = max(P_raw); xline(f_raw(ix),'r--',sprintf('%.4f Hz',f_raw(ix)));
+% % title('FFT — Raw signal'); ylabel('PSD'); xlabel('Frequency (Hz)'); grid on;
+% 
+% % subplot(4,1,4);
+% % plot(f_filt, P_filt);
+% % [~,ix] = max(P_filt); xline(f_filt(ix),'r--',sprintf('%.4f Hz',f_filt(ix)));
+% % title('FFT — Filtered signal'); ylabel('PSD'); xlabel('Frequency (Hz)'); grid on;
+% 
+% sgtitle(sprintf('%s — [%.0f to %.0f s]', SIGNAL, T_MIN, T_MAX), 'Interpreter','none');
+% 
+% % ──────────────────────────────────────
+% function P = compute_fft(sig, N, mask)
+%     Y  = fft((sig - mean(sig)) .* hann(numel(sig)), N);
+%     P2 = abs(Y/N).^2;
+%     P2 = [P2(1); 2*P2(2:floor(N/2)+1)];
+%     P  = P2(mask);
+% end
